@@ -121,12 +121,13 @@ export const ZZFX =
         sustainVolume = 1,
         decay = 0,
         tremolo = 0,
-        filter = 0
+        filter = 0,
+        sampleRate = this.sampleRate
     )
     {
-        // init parameters
-        let sampleRate = this.sampleRate,
-            PI2 = Math.PI*2, 
+        // init parameters; all user-facing time parameters are in seconds and
+        // only converted to sample counts/per-sample deltas below
+        let PI2 = Math.PI*2, 
             abs = Math.abs, 
             sign = v => v<0?-1:1, 
             startSlide = slide *= 500 * PI2 / sampleRate / sampleRate,
@@ -138,12 +139,12 @@ export const ZZFX =
             jump = 1,      // pitch jump timer
             length,        // sample length
             b,             // sample buffer
-            t = 0,         // sample time
+            t = 0,         // phase accumulator (radians)
             i = 0,         // sample index 
             s = 0,         // sample value
         f,             // wave frequency
 
-        // biquad LP/HP filter
+        // biquad LP/HP filter coefficients (w is radians per sample)
         quality = 2, w = PI2 * abs(filter) * 2 / sampleRate,
         cos = Math.cos(w), alpha = Math.sin(w) / 2 / quality,
         a0 = 1 + alpha, a1 = -2*cos / a0, a2 = (1 - alpha) / a0,
@@ -151,8 +152,9 @@ export const ZZFX =
         b1 = -(sign(filter) + cos) / a0, b2 = b0,
         x2 = 0, x1 = 0, y2 = 0, y1 = 0;
 
-        // scale by sample rate
-        const minAttack = 9; // prevent pop if attack is 0
+        // All envelope/timing parameters arrive in seconds. Convert them once
+        // here into sample counts for the output layer.
+        const minAttack = 9; // samples, prevent pop if attack is 0
         attack = attack * sampleRate || minAttack;
         decay *= sampleRate;
         sustain *= sampleRate;
@@ -161,11 +163,15 @@ export const ZZFX =
         deltaSlide *= 500 * PI2 / sampleRate**3;
         modulation *= PI2 / sampleRate;
         pitchJump *= PI2 / sampleRate;
-        pitchJumpTime *= sampleRate;
-        repeatTime = repeatTime * sampleRate | 0;
+        pitchJumpTime = pitchJumpTime * sampleRate | 0; // samples
+        repeatTime = repeatTime * sampleRate | 0;      // samples
+
+        // total duration in seconds; the output layer converts it to samples
+        const durationSeconds =
+            (attack + decay + sustain + release + delay) / sampleRate;
 
         // allocate the full sample buffer up front, much faster than growing an array
-        length = attack + decay + sustain + release + delay | 0;
+        length = durationSeconds * sampleRate | 0;
         b = new Float32Array(length > 0 ? length : 0);
 
         // generate waveform

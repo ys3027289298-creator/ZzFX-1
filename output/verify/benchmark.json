@@ -1,0 +1,22 @@
+{
+  "iterations": 400,
+  "sounds": 11,
+  "rows": [
+    {
+      "sampleRate": 44100,
+      "totalMs": "2239.47",
+      "perSoundMs": "0.5090",
+      "samplesPerCall": 10626,
+      "nsPerSample": "47.90"
+    },
+    {
+      "sampleRate": 48000,
+      "totalMs": "2317.66",
+      "perSoundMs": "0.5267",
+      "samplesPerCall": 11565,
+      "nsPerSample": "45.55"
+    }
+  ],
+  "timeRatio": 1.034912452705364,
+  "sampleRatio": 1.088431067230198
+}
