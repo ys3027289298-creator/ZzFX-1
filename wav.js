@@ -1,76 +1,142 @@
 // wav.js by Frank Force - https://github.com/KilledByAPixel/ZzFX
 
-export function buildWavURL(sampleChannels, sampleRate = 44100)
+// build a wav file as a byte array from sample channels
+// - sampleChannels: array of sample arrays, one per channel, values in [-1, 1]
+// - sampleRate: samples per second, must be a positive integer
+// - options.bitDepth: bits per sample, must be 1, 8, or 16 (default 16)
+// - options.signed: signed or unsigned pcm (default signed for 16-bit,
+//   unsigned for 8-bit, ignored for 1-bit)
+// - options.threshold: 1-bit decision threshold in [-1, 1] (default 0),
+//   a sample becomes a 1 bit when sample >= threshold
+// with default options the output is byte identical to previous releases
+export function buildWavBytes(sampleChannels, sampleRate = 44100, options = {})
 {
     const channelCount = sampleChannels.length;
-    const sampleCount = sampleChannels[0].length;
+    const sampleCount = channelCount ? sampleChannels[0].length : 0;
     const length = channelCount * sampleCount;
-    const headerSize = 23;
-    const buffer = new Int16Array(length + headerSize);
     console.assert(channelCount && sampleCount, 'No channels or samples found!');
 
-    {    
+    // parse and validate options
+    const { bitDepth = 16, signed = bitDepth > 8, threshold = 0 } = options;
+    if (![1, 8, 16].includes(bitDepth))
+        throw new RangeError(`bitDepth must be 1, 8, or 16, got ${bitDepth}`);
+    if (!(sampleRate > 0) || sampleRate % 1)
+        throw new RangeError(`sampleRate must be a positive integer, got ${sampleRate}`);
+    if (bitDepth == 1 && !(threshold >= -1 && threshold <= 1))
+        throw new RangeError(`threshold must be between -1 and 1, got ${threshold}`);
+
+    // 1-bit packs 8 samples per byte, padding the final byte with 0 bits
+    const headerSize = 46;
+    const dataSize = bitDepth == 1 ? Math.ceil(length / 8) : length * bitDepth / 8;
+    const riffSize = dataSize + headerSize - 8;
+
+    // 16-bit keeps the hardcoded block align and byte rate of previous
+    // releases so default output stays byte identical, other bit depths
+    // get spec correct values
+    const blockAlign = bitDepth == 16 ? 4 : Math.ceil(channelCount * bitDepth / 8);
+    const byteRate = bitDepth == 16 ? 2 * channelCount * sampleRate :
+        Math.ceil(sampleRate * channelCount * bitDepth / 8);
+
+    const buffer = new Uint8Array(headerSize + dataSize);
+    const view = new DataView(buffer.buffer);
+    const writeText = (offset, text) =>
+    {
+        for (let i = 0; i < text.length; ++i)
+            buffer[offset + i] = text.charCodeAt(i);
+    };
+
+    {
         // wave header adapted from https://gist.github.com/asanoboy/3979747
 
         // RIFF (ascii)
-        buffer[ 0] = 0x4952; // RF
-        buffer[ 1] = 0x4646; // FF
+        writeText(0, 'RIFF');
 
         // RIFF size
-        const dataSize = 2*length;
-        const riffSize = dataSize + headerSize*2 - 8;
-        buffer[ 2] = riffSize & 0x0000ffff;
-        buffer[ 3] = (riffSize & 0xffff0000) >> 16;
+        view.setUint32(4, riffSize, true);
 
         // WAVE (ascii)
-        buffer[ 4] = 0x4157; // WA
-        buffer[ 5] = 0x4556; // VE
+        writeText(8, 'WAVE');
 
         // fmt (ascii)
-        buffer[ 6] = 0x6d66; // fm
-        buffer[ 7] = 0x2074; // t
+        writeText(12, 'fmt ');
 
         // format chunk size: 18
-        buffer[ 8] = 0x0012; 
-        buffer[ 9] = 0x0000;
+        view.setUint32(16, 18, true);
 
         // format tag: 1 (PCM format)
-        buffer[10] = 0x0001;
+        view.setUint16(20, 1, true);
 
         // channel count
-        buffer[11] = channelCount;
+        view.setUint16(22, channelCount, true);
 
         // samples per second
-        buffer[12] = sampleRate & 0x0000ffff;
-        buffer[13] = (sampleRate & 0xffff0000) >> 16;
+        view.setUint32(24, sampleRate, true);
 
         // bytes per second
-        buffer[14] = (2*channelCount*sampleRate) & 0x0000ffff;
-        buffer[15] = ((2*channelCount*sampleRate) & 0xffff0000) >> 16;
+        view.setUint32(28, byteRate, true);
 
-        // sample size
-        buffer[16] = 0x0004; // bytes per sample: 4
-        buffer[17] = 0x0010; // bit per sample: 16
-        buffer[18] = 0x0000; // padding
+        // block align and bits per sample
+        view.setUint16(32, blockAlign, true);
+        view.setUint16(34, bitDepth, true);
+        view.setUint16(36, 0, true); // padding
 
         // DATA (ascii)
-        buffer[19] = 0x6164; // DA
-        buffer[20] = 0x6174; // TA
+        writeText(38, 'data');
 
         // data size
-        buffer[21] = dataSize & 0x0000ffff;
-        buffer[22] = (dataSize & 0xffff0000) >> 16;
+        view.setUint32(42, dataSize, true);
     }
 
-    // copy samples to buffer
-    for (let j = channelCount; j--;)
-    for (let i = sampleCount; i--;)
+    if (bitDepth == 16)
     {
-        const s = sampleChannels[j][i];
-        buffer[i*channelCount + j + headerSize] = s<1 ? (s * (1<<15) | 0) : (1<<15) - 1;
+        // copy samples to buffer, same conversion as previous releases
+        for (let j = channelCount; j--;)
+        for (let i = sampleCount; i--;)
+        {
+            const s = sampleChannels[j][i];
+            const v = s<1 ? (s * (1<<15) | 0) : (1<<15) - 1;
+            const offset = headerSize + 2*(i*channelCount + j);
+            signed ? view.setInt16(offset, v, true)
+                   : view.setUint16(offset, v + (1<<15), true);
+        }
+    }
+    else if (bitDepth == 8)
+    {
+        // 8-bit clamps out of range samples instead of wrapping
+        for (let j = channelCount; j--;)
+        for (let i = sampleCount; i--;)
+        {
+            const s = sampleChannels[j][i];
+            const v = s<1 ? Math.max(s * (1<<7) | 0, -(1<<7)) : (1<<7) - 1;
+            buffer[headerSize + i*channelCount + j] = signed ? v & 0xff : v + (1<<7);
+        }
+    }
+    else // bitDepth == 1
+    {
+        // 1-bit pcm, samples are decided against the threshold and packed
+        // msb first, 8 samples per byte, interleaved per sample frame
+        let byte = 0, bitCount = 0, offset = headerSize;
+        for (let i = 0; i < sampleCount; ++i)
+        for (let j = 0; j < channelCount; ++j)
+        {
+            byte = byte<<1 | (sampleChannels[j][i] >= threshold ? 1 : 0);
+            if (++bitCount == 8)
+            {
+                buffer[offset++] = byte;
+                byte = bitCount = 0;
+            }
+        }
+        if (bitCount)
+            buffer[offset] = byte << (8 - bitCount);
     }
 
+    return buffer;
+}
+
+// build a wav blob url from sample channels, see buildWavBytes for options
+export function buildWavURL(sampleChannels, sampleRate = 44100, options)
+{
     // return the url
-    const blob = new Blob([buffer], {type:'audio/wav'});
+    const blob = new Blob([buildWavBytes(sampleChannels, sampleRate, options)], {type:'audio/wav'});
     return URL.createObjectURL(blob);
 }

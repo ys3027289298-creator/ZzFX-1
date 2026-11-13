@@ -61,6 +61,40 @@ zzfx(...[,,129,.01,,.15,,,,,,,,5]); // Drum
 - Export/Import: Drag-and-drop support for sound lists.
 - Offline Playback: Save sounds as .wav files.
 
+## 💾 PCM Export (wav.js)
+
+Sounds can be exported as wav files with configurable bit depth, useful for
+old hardware that needs 8-bit or even 1-bit PCM.
+
+```javascript
+import {ZZFX} from './ZzFX.js';
+import {buildWavURL, buildWavBytes} from './wav.js';
+
+const samples = ZZFX.buildSamples(...[,,925,.04,.3,.6,1,.3]);
+
+buildWavBytes([samples], 44100); // default: 16-bit signed, byte identical to v1.4.0
+buildWavBytes([samples], 44100, {bitDepth: 8});                    // 8-bit unsigned
+buildWavBytes([samples], 44100, {bitDepth: 8, signed: true});      // 8-bit signed
+buildWavBytes([samples], 44100, {bitDepth: 1});                    // 1-bit, threshold 0
+buildWavBytes([samples], 44100, {bitDepth: 1, threshold: .3});     // 1-bit, threshold .3
+const url = buildWavURL([samples], 44100, {bitDepth: 8}); // blob url for download
+```
+
+- `bitDepth` must be 1, 8, or 16 (default 16), anything else throws a `RangeError`.
+- `signed` defaults to signed for 16-bit and unsigned for 8-bit, and is ignored for 1-bit.
+- `threshold` (1-bit only) decides each sample against `sample >= threshold` and
+  must be in [-1, 1]. The default 0 decides on zero crossings, which preserves
+  the fundamental frequency and maximizes loudness; higher thresholds gate quiet
+  passages and make the sound thinner. 1-bit samples are packed 8 per byte, msb first.
+- Exported duration matches the source sound; 1-bit output is padded to a byte
+  boundary with at most 7 silent samples (<0.2 ms at 44100 Hz).
+- Memory usage is bounded by the input samples plus one output buffer of
+  `46 + ceil(sampleCount * channels * bitDepth / 8)` bytes, allocated in a single pass.
+
+Run `node test/wav.test.mjs` to verify bit-exact backwards compatibility,
+duration, energy peaks, parameter validation, and to regenerate the demo files
+in `artifacts/pcm-export/`.
+
 ## 🖥️ ZzFX Micro Code
 
 Here's all the code you need to play ZzFX sounds with JavaScript!
