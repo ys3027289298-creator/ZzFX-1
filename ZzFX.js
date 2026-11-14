@@ -49,6 +49,78 @@ ZzFX Features
 export function zzfx(...parameters) { return ZZFX.play(...parameters) }
 
 ///////////////////////////////////////////////////////////////////////////////
+// ZZFX filter toolkit - first/second order lowpass, highpass, and bandpass
+
+// maximum allowed filter quality factor, above this the poles sit so close
+// to the unit circle that the filter is useless in practice
+const ZZFXFilterMaxQ = 100;
+
+// valid filter types
+const ZZFXFilterTypes = ['lowpass', 'highpass', 'bandpass'];
+
+// Compute coefficients for a first or second order filter, returns
+// [b0, b1, b2, a1, a2] for y = b2*x2 + b1*x1 + b0*x - a2*y2 - a1*y1.
+// Pass filter as an object to buildSamples to use these filters, for example
+// zzfx(...[,,,,,,,,,,,,,,,,,,,,,{type:'lowpass', frequency:500, q:2, order:2}])
+// - type: 'lowpass' (default), 'highpass', or 'bandpass'
+// - frequency: cutoff/center frequency in hz, must be in (0, sampleRate/2)
+// - q: quality factor, must be in (0, ZZFXFilterMaxQ], default is 1/sqrt(2)
+// - order: 1 or 2 (default), bandpass requires order 2, q only affects order 2
+//
+// Stability proof (all poles strictly inside the unit circle):
+// Second order: denominator 1 + a1 z^-1 + a2 z^-2 with
+//   a1 = -2 cos(w)/(1+alpha), a2 = (1-alpha)/(1+alpha),
+//   w = 2*PI*frequency/sampleRate in (0, PI), alpha = sin(w)/(2*q) > 0.
+//   Jury stability criteria for 1 + a1 z^-1 + a2 z^-2 are
+//   1) 1 - a2      = 2 alpha/(1+alpha)     > 0 because alpha > 0
+//   2) 1 + a1 + a2 = 2 (1-cos w)/(1+alpha) > 0 because w < PI so cos w < 1
+//   3) 1 - a1 + a2 = 2 (1+cos w)/(1+alpha) > 0 because w > 0 so cos w > -1
+//   All three hold, so both poles satisfy |p| < 1. For complex poles the
+//   radius is |p| = sqrt(a2) = sqrt((1-alpha)/(1+alpha)) < 1.
+// First order: single pole at p = (1-k)/(1+k) with k = tan(PI*f/fs) > 0,
+//   so |p| = |1-k|/(1+k) < 1.
+// The validation below guarantees w in (0, PI) and q in (0, ZZFXFilterMaxQ],
+// so the premises always hold and the filter can never diverge.
+function ZZFXFilterCoefficients(settings, sampleRate)
+{
+    const type = settings.type == undefined ? 'lowpass' : settings.type,
+        frequency = settings.frequency,
+        q = settings.q == undefined ? Math.SQRT1_2 : settings.q,
+        order = settings.order == undefined ? 2 : settings.order;
+
+    // validate parameters so the stability proof premises hold
+    if (!ZZFXFilterTypes.includes(type))
+        throw new TypeError('ZZFX filter type must be "lowpass", "highpass", or "bandpass", got "' + type + '"');
+    if (!(frequency > 0 && frequency < sampleRate/2))
+        throw new RangeError('ZZFX filter frequency must be between 0 and ' + sampleRate/2 + ' hz (nyquist), got ' + frequency);
+    if (order != 1 && order != 2)
+        throw new RangeError('ZZFX filter order must be 1 or 2, got ' + order);
+    if (type == 'bandpass' && order == 1)
+        throw new RangeError('ZZFX bandpass filter requires order 2');
+    if (order == 2 && !(q > 0 && q <= ZZFXFilterMaxQ))
+        throw new RangeError('ZZFX filter q must be between 0 (exclusive) and ' + ZZFXFilterMaxQ + ' (inclusive), got ' + q);
+
+    if (order == 1)
+    {
+        // first order, bilinear transform of analog prototype, k = tan(w/2)
+        const k = Math.tan(Math.PI*frequency/sampleRate), k1 = 1/(1+k);
+        return type == 'lowpass' ?
+            [k*k1, k*k1, 0, (k-1)*k1, 0] : // lowpass
+            [k1, -k1, 0, (k-1)*k1, 0];     // highpass
+    }
+
+    // second order RBJ biquad, all types share the same denominator (poles)
+    const w = 2*Math.PI*frequency/sampleRate,
+        cos = Math.cos(w), alpha = Math.sin(w)/(2*q), a0 = 1/(1+alpha),
+        a1 = -2*cos*a0, a2 = (1-alpha)*a0;
+    return type == 'lowpass' ?
+        [(1-cos)/2*a0, (1-cos)*a0, (1-cos)/2*a0, a1, a2] :
+        type == 'highpass' ?
+        [(1+cos)/2*a0, -(1+cos)*a0, (1+cos)/2*a0, a1, a2] :
+        [alpha*a0, 0, -alpha*a0, a1, a2]; // bandpass, constant 0 db peak gain
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // ZZFX API for playing sounds
 export const ZZFX =
 {
@@ -151,6 +223,20 @@ export const ZZFX =
         b1 = -(sign(filter) + cos) / a0, b2 = b0,
         x2 = 0, x1 = 0, y2 = 0, y1 = 0;
 
+        // setup filter, a number uses the legacy biquad above, an object
+        // uses a first/second order lowpass/highpass/bandpass filter
+        let fb0=0, fb1=0, fb2=0, fa1=0, fa2=0, // object filter coefficients
+            fx1=0, fx2=0, fy1=0, fy2=0,        // object filter state
+            filterObject = filter && typeof filter == 'object';
+        if (filterObject)
+            [fb0, fb1, fb2, fa1, fa2] = ZZFXFilterCoefficients(filter, sampleRate);
+        else if (filter && !(abs(filter) < sampleRate/4))
+            // the legacy biquad is only stable while its normalized cutoff
+            // w = 2*PI2*|filter|/sampleRate stays in (0, PI), outside that
+            // range its poles leave the unit circle and the output diverges
+            throw new RangeError('ZZFX filter cutoff must be between 0 and ' +
+                sampleRate/4 + ' hz, got ' + filter);
+
         // scale by sample rate
         const minAttack = 9; // prevent pop if attack is 0
         attack = attack * sampleRate || minAttack;
@@ -200,7 +286,9 @@ export const ZZFX =
                     b[i-delay|0]/2/volume) : s;              // sample delay
 
                 if (filter)                                  // apply filter
-                    s = y1 = b2*x2 + b1*(x2=x1) + b0*(x1=s) - a2*y2 - a1*(y2=y1);
+                    s = filterObject ?                       // object filter
+                    fy1 = fb2*fx2 + fb1*(fx2=fx1) + fb0*(fx1=s) - fa2*fy2 - fa1*(fy2=fy1) :
+                    y1 = b2*x2 + b1*(x2=x1) + b0*(x1=s) - a2*y2 - a1*(y2=y1);
             }
 
             f = (frequency += slide += deltaSlide) *// frequency
