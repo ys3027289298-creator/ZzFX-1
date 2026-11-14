@@ -225,6 +225,109 @@ export const ZZFX =
         return b; // return sample buffer
     },
 
+    // get equal-power stereo pan gains for a pan value in [-1, 1]
+    // equal-power law: theta = (pan+1)*PI/4, leftGain^2 + rightGain^2 == 1
+    getPanGains: function(pan=0)
+    {
+        if (!Number.isFinite(pan) || pan < -1 || pan > 1)
+            throw new RangeError('ZZFX.getPanGains: pan must be a finite number in [-1, 1].');
+
+        // snap endpoints so hard pans have no floating-point leakage
+        if (pan <= -1) return [1, 0];
+        if (pan >= 1) return [0, 1];
+
+        const theta = (pan + 1) * Math.PI / 4;
+        return [Math.cos(theta), Math.sin(theta)];
+    },
+
+    // mix N independent voice channels onto one stereo bus
+    // voices:          array of Float32Array sample buffers, one buffer per channel
+    // channelSettings: optional per-channel {gain, pan} or [gain, pan] (defaults: gain 1, pan 0)
+    // returns [leftBus, rightBus]; each bus is a Float32Array as long as the longest voice
+    buildBusSamples: function(voices, channelSettings=[])
+    {
+        if (!Array.isArray(voices) || !voices.length)
+            throw new TypeError('ZZFX.buildBusSamples: voices must be a non-empty array of Float32Array buffers.');
+        if (!Array.isArray(channelSettings))
+            throw new TypeError('ZZFX.buildBusSamples: channelSettings must be an array.');
+        if (channelSettings.length > voices.length)
+            throw new RangeError('ZZFX.buildBusSamples: more channel settings than voices.');
+
+        // validate voices and determine the bus length up front
+        let busLength = 0;
+        for (const voice of voices)
+        {
+            if (!(voice instanceof Float32Array))
+                throw new TypeError('ZZFX.buildBusSamples: each voice must be a Float32Array.');
+            busLength = Math.max(busLength, voice.length);
+        }
+
+        const channelCount = voices.length;
+        const leftBus = new Float32Array(busLength);
+        const rightBus = new Float32Array(busLength);
+
+        // precompute per-channel equal-power amplitude gains (one pass, no per-sample math)
+        const gainLeft = new Float32Array(channelCount);
+        const gainRight = new Float32Array(channelCount);
+        for (let c = channelCount; c--;)
+        {
+            const setting = channelSettings[c];
+            let gain = 1, pan = 0;
+            if (setting != null)
+            {
+                if (Array.isArray(setting))
+                {
+                    gain = setting[0] != undefined ? setting[0] : 1;
+                    pan = setting[1] != undefined ? setting[1] : 0;
+                }
+                else
+                {
+                    gain = setting.gain != undefined ? setting.gain : 1;
+                    pan = setting.pan != undefined ? setting.pan : 0;
+                }
+            }
+
+            if (!Number.isFinite(gain) || gain < 0)
+                throw new RangeError(`ZZFX.buildBusSamples: channel ${c} gain must be a finite number >= 0.`);
+            if (!Number.isFinite(pan) || pan < -1 || pan > 1)
+                throw new RangeError(`ZZFX.buildBusSamples: channel ${c} pan must be a finite number in [-1, 1].`);
+
+            const panGains = this.getPanGains(pan);
+            gainLeft[c] = gain * panGains[0];
+            gainRight[c] = gain * panGains[1];
+        }
+
+        // remix every channel onto the stereo bus in a single fused pass
+        for (let c = 0; c < channelCount; ++c)
+        {
+            const voice = voices[c];
+            const gl = gainLeft[c];
+            const gr = gainRight[c];
+            for (let i = 0; i < voice.length; ++i)
+            {
+                const sample = voice[i];
+                leftBus[i] += sample * gl;
+                rightBus[i] += sample * gr;
+            }
+        }
+
+        return [leftBus, rightBus];
+    },
+
+    // build N voices from N zzfx parameter arrays, then mix them onto one stereo bus
+    buildVoiceBus: function(voiceParameters, channelSettings=[])
+    {
+        if (!Array.isArray(voiceParameters) || !voiceParameters.length)
+            throw new TypeError('ZZFX.buildVoiceBus: voiceParameters must be a non-empty array.');
+        for (const parameters of voiceParameters)
+            if (!Array.isArray(parameters))
+                throw new TypeError('ZZFX.buildVoiceBus: each voice parameter entry must be an array.');
+
+        const voices = voiceParameters.map(parameters =>
+            this.buildSamples(...parameters));
+        return this.buildBusSamples(voices, channelSettings);
+    },
+
     // get frequency of a musical note on a diatonic scale
     getNote: function(semitoneOffset=0, rootNoteFrequency=440)
     {
