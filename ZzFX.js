@@ -49,6 +49,180 @@ ZzFX Features
 export function zzfx(...parameters) { return ZZFX.play(...parameters) }
 
 ///////////////////////////////////////////////////////////////////////////////
+// Pluggable processing chain
+//
+// The three signal-processing passes that used to be interleaved inside the
+// buildSamples loop (envelope/delay, slide/phase and the biquad filter) are
+// now independent stages implementing one shared interface:
+//
+//   stage.name      stable identifier string
+//   stage.enabled   when false the stage is bypassed and never runs, so its
+//                   internal state is frozen for the whole render
+//   stage.process(ctx)  transform the current sample ctx.s in place
+//   stage.snapshot()    plain object copy of the stage's internal state
+//
+// Stages communicate only through the per-voice context object; each stage
+// owns disjoint closure state, so enabling or disabling one stage cannot
+// mutate another stage's internal state.
+
+// identifiers of the pluggable stages, default order matches the original
+// interleaved loop exactly: envelope -> filter -> slide
+const ZZFX_DEFAULT_CHAIN_ORDER = Object.freeze(['envelope', 'filter', 'slide']);
+const ZZFX_CHAIN_STAGE_NAMES = ZZFX_DEFAULT_CHAIN_ORDER;
+
+// build a configured chain of processing stages
+//
+// order:   permutation of 'envelope', 'filter' and 'slide'
+// enabled: map of stage name -> boolean (stages missing from the map default
+//          to enabled)
+//
+// throws TypeError on a non-array order, unknown/duplicate/missing stage
+// names or non-boolean enabled flags.
+function zzfxCreateChain(scope, order = ZZFX_DEFAULT_CHAIN_ORDER, enabled = {})
+{
+    if (!Array.isArray(order))
+        throw new TypeError(`ZzFX chain order must be an array, got ${typeof order}`);
+
+    if (order.length != ZZFX_CHAIN_STAGE_NAMES.length
+        || order.some(stageName => !ZZFX_CHAIN_STAGE_NAMES.includes(stageName))
+        || new Set(order).size != order.length)
+    {
+        throw new TypeError(
+            `ZzFX chain order must be a permutation of [${ZZFX_CHAIN_STAGE_NAMES.join(', ')}], got [${order.join(', ')}]`);
+    }
+
+    if (enabled === null || typeof enabled != 'object')
+        throw new TypeError(`ZzFX chain enabled map must be an object, got ${typeof enabled}`);
+
+    for (const stageName in enabled)
+    {
+        if (!ZZFX_CHAIN_STAGE_NAMES.includes(stageName))
+            throw new TypeError(`ZzFX chain enabled map has unknown stage '${stageName}'`);
+        if (typeof enabled[stageName] != 'boolean')
+            throw new TypeError(`ZzFX chain enabled flag for '${stageName}' must be a boolean, got ${typeof enabled[stageName]}`);
+    }
+
+    // one factory per stage name; each factory closes over exactly the same
+    // locals the original loop mutated, preserving its arithmetic verbatim
+    const stageFactories =
+    {
+        // amplitude envelope (attack/decay/sustain/release) plus sample delay
+        envelope: scope =>
+        {
+            const {
+                volume, attack, decay, sustain, sustainVolume, length,
+                release, delay, b
+            } = scope;
+            const state = { calls: 0, delayMixSamples: 0 };
+            return {
+                name: 'envelope',
+                enabled: true,
+                process(ctx)
+                {
+                    state.calls++;
+
+                    const tremoloFactor = scope.repeatTime ?
+                            1 - scope.tremolo + scope.tremolo*Math.sin(scope.PI2*ctx.i/scope.repeatTime) : 1,
+                        shapeFactor = scope.shape > 4 ? ctx.s : scope.sign(ctx.s)*scope.abs(ctx.s)**scope.shapeCurve,
+                        envelopeFactor = ctx.i < attack ? ctx.i/attack :
+                        ctx.i < attack + decay ?
+                        1-((ctx.i-attack)/decay)*(1-sustainVolume) :
+                        ctx.i < attack  + decay + sustain ?
+                        sustainVolume :
+                        ctx.i < length - delay ?
+                        (length - ctx.i - delay)/release * sustainVolume :
+                        0;
+
+                    ctx.s = tremoloFactor * shapeFactor * envelopeFactor;
+
+                    if (delay)
+                    {
+                        ctx.s = ctx.s/2 + (delay > ctx.i ? 0 :
+                            (ctx.i<length-delay? 1 : (length-ctx.i)/delay) *
+                            b[ctx.i-delay|0]/2/volume);
+                        state.delayMixSamples++;
+                    }
+                },
+                snapshot: () => ({ ...state })
+            };
+        },
+
+        // biquad low/high pass filter, carries the original x1/x2/y1/y2 taps
+        filter: scope =>
+        {
+            const state = { calls: 0, x1: 0, x2: 0, y1: 0, y2: 0 };
+            return {
+                name: 'filter',
+                enabled: true,
+                process(ctx)
+                {
+                    // original loop only filtered when the filter param is set
+                    if (!scope.filter)
+                        return;
+
+                    state.calls++;
+                    state.y1 = scope.b2*state.x2 + scope.b1*(state.x2=state.x1) +
+                        scope.b0*(state.x1=ctx.s) - scope.a2*state.y2 - scope.a1*(state.y2=state.y1);
+                    ctx.s = state.y1;
+                },
+                snapshot: () => ({ ...state })
+            };
+        },
+
+        // slide, delta slide, modulation/noise phase advance and pitch jumps
+        slide: scope =>
+        {
+            const state =
+            {
+                calls: 0,
+                frequency: scope.frequency,
+                slide: scope.slide,
+                t: scope.t,
+                modOffset: scope.modOffset,
+                jump: scope.jump,
+                repeat: scope.repeat
+            };
+            return {
+                name: 'slide',
+                enabled: true,
+                process(ctx)
+                {
+                    state.calls++;
+
+                    ctx.f = (state.frequency += state.slide += scope.deltaSlide) *
+                        Math.cos(scope.modulation*state.modOffset++);
+                    state.t += ctx.f + ctx.f*scope.noise*(ctx.i*ctx.i*scope.PI2%2-1);
+
+                    if (state.jump && ++state.jump > scope.pitchJumpTime)
+                    {
+                        state.frequency += scope.pitchJump;
+                        scope.startFrequency += scope.pitchJump;
+                        state.jump = 0;
+                    }
+
+                    if (scope.repeatTime && !(++state.repeat % scope.repeatTime))
+                    {
+                        state.frequency = scope.startFrequency;
+                        state.slide = scope.startSlide;
+                        state.jump ||= 1;
+                    }
+
+                    ctx.t = state.t;
+                },
+                snapshot: () => ({ ...state })
+            };
+        }
+    };
+
+    return order.map(stageName =>
+    {
+        const stage = stageFactories[stageName](scope);
+        stage.enabled = enabled[stageName] !== false;
+        return stage;
+    });
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // ZZFX API for playing sounds
 export const ZZFX =
 {
@@ -121,7 +295,10 @@ export const ZZFX =
         sustainVolume = 1,
         decay = 0,
         tremolo = 0,
-        filter = 0
+        filter = 0,
+        // optional processing chain configuration; when omitted the stages
+        // run in the original order with every stage enabled
+        chainOptions = null
     )
     {
         // init parameters
@@ -141,7 +318,7 @@ export const ZZFX =
             t = 0,         // sample time
             i = 0,         // sample index 
             s = 0,         // sample value
-        f,             // wave frequency
+            f = 0,         // wave frequency
 
         // biquad LP/HP filter
         quality = 2, w = PI2 * abs(filter) * 2 / sampleRate,
@@ -168,10 +345,37 @@ export const ZZFX =
         length = attack + decay + sustain + release + delay | 0;
         b = new Float32Array(length > 0 ? length : 0);
 
+        // build the pluggable processing chain (default order reproduces the
+        // original interleaved loop exactly)
+        if (chainOptions !== null && (typeof chainOptions != 'object' || Array.isArray(chainOptions)))
+            throw new TypeError(`ZzFX chainOptions must be an object, got ${Array.isArray(chainOptions) ? 'array' : typeof chainOptions}`);
+
+        // shared closure view of the locals every stage was originally mutating
+        const stageScope = {
+            PI2, abs, sign,
+            shape, shapeCurve, tremolo, repeatTime,
+            attack, decay, sustain, sustainVolume, length, release, delay,
+            volume, b,
+            filter, a1, a2, b0, b1, b2,
+            frequency, slide, deltaSlide, modulation, noise, t, modOffset,
+            jump, repeat, startFrequency, startSlide,
+            pitchJump, pitchJumpTime
+        };
+        const chain = zzfxCreateChain(
+            stageScope,
+            chainOptions?.order,
+            chainOptions?.enabled);
+
+        // per-voice context shared between stages for the current sample
+        const chainContext = { i: 0, s: 0, f: 0, t: 0 };
+
         // generate waveform
         for(; i < length; b[i++] = s * volume)                 // sample
         {
-            if (!(++crush%(bitCrush*100|0)))                   // bit crush
+            // the bit-crush gate wraps the waveform + envelope + filter
+            // passes exactly as it did in the original loop
+            const crushGateOpen = !(++crush%(bitCrush*100|0));  // bit crush
+            if (crushGateOpen)
             {
                 s = shape? shape>1? shape>2? shape>3? shape>4? // wave shape
                     (t/PI2%1 < shapeCurve/2? 1 : -1) :         // 5 square duty
@@ -180,47 +384,33 @@ export const ZZFX =
                     1-(2*t/PI2%2+2)%2:                         // 2 saw
                     1-4*abs(Math.round(t/PI2)-t/PI2):          // 1 triangle
                     Math.sin(t);                               // 0 sin
-
-                s = (repeatTime ?
-                        1 - tremolo + tremolo*Math.sin(PI2*i/repeatTime) // tremolo
-                        : 1) *
-                    (shape>4?s:sign(s)*abs(s)**shapeCurve) * // shape curve
-                    (i < attack ? i/attack :                 // attack
-                    i < attack + decay ?                     // decay
-                    1-((i-attack)/decay)*(1-sustainVolume) : // decay falloff
-                    i < attack  + decay + sustain ?          // sustain
-                    sustainVolume :                          // sustain volume
-                    i < length - delay ?                     // release
-                    (length - i - delay)/release *           // release falloff
-                    sustainVolume :                          // release volume
-                    0);                                      // post release
-
-                s = delay ? s/2 + (delay > i ? 0 :           // delay
-                    (i<length-delay? 1 : (length-i)/delay) * // release delay 
-                    b[i-delay|0]/2/volume) : s;              // sample delay
-
-                if (filter)                                  // apply filter
-                    s = y1 = b2*x2 + b1*(x2=x1) + b0*(x1=s) - a2*y2 - a1*(y2=y1);
             }
 
-            f = (frequency += slide += deltaSlide) *// frequency
-                Math.cos(modulation*modOffset++);   // modulation
-            t += f + f*noise*(i*i*PI2%2-1);         // noise
-
-            if (jump && ++jump > pitchJumpTime)     // pitch jump
-            { 
-                frequency += pitchJump;             // apply pitch jump
-                startFrequency += pitchJump;        // also apply to start
-                jump = 0;                           // stop pitch jump time
-            } 
-
-            if (repeatTime && !(++repeat % repeatTime)) // repeat
-            { 
-                frequency = startFrequency;   // reset frequency
-                slide = startSlide;           // reset slide
-                jump ||= 1;                   // reset pitch jump time
+            // run the enabled stages in configured order; the envelope and
+            // filter passes only act on samples admitted by the crush gate,
+            // while the slide/phase stage advances on every sample
+            chainContext.i = i;
+            chainContext.s = s;
+            chainContext.f = f;
+            chainContext.t = t;
+            for (const stage of chain)
+            {
+                if (!stage.enabled)
+                    continue;
+                if (!crushGateOpen &&
+                    (stage.name == 'envelope' || stage.name == 'filter'))
+                    continue;
+                stage.process(chainContext);
             }
+            s = chainContext.s;
+            f = chainContext.f;
+            t = chainContext.t;
         }
+
+        // publish internal-state snapshots of every stage when requested
+        if (chainOptions?.snapshotHolder)
+            chainOptions.snapshotHolder.snapshots =
+                Object.fromEntries(chain.map(stage => [stage.name, stage.snapshot()]));
 
         return b; // return sample buffer
     },
