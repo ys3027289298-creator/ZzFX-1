@@ -57,7 +57,13 @@ export const ZZFX =
     
     // sample rate for audio
     sampleRate: 44100,
-    
+
+    // slide curve used by the phase accumulator: 0 = linear (legacy), 1 = exponential
+    slideCurve: 0,
+
+    // base instantaneous frequency (Hz) of the most recently built samples, one entry per sample
+    lastFrequencyTrace: null,
+
     // create shared audio context
     audioContext: new AudioContext,
 
@@ -124,6 +130,10 @@ export const ZZFX =
         filter = 0
     )
     {
+        // phase accumulator requires a positive carrier frequency
+        if (!(frequency > 0))
+            throw new RangeError(`ZzFX: frequency must be > 0, got ${frequency}`);
+
         // init parameters
         let sampleRate = this.sampleRate,
             PI2 = Math.PI*2, 
@@ -141,7 +151,12 @@ export const ZZFX =
             t = 0,         // sample time
             i = 0,         // sample index 
             s = 0,         // sample value
-        f,             // wave frequency
+        f,             // instantaneous angular frequency used by the phase accumulator this sample
+        frequencyTrace, // base instantaneous frequency in Hz, exported for verification
+        exponential = this.slideCurve === 1, // 0 = linear slide (legacy), 1 = exponential slide
+        logFrequency,  // log-space phase accumulator carrier (exponential curve only)
+        logStep,       // log-space slide step (exponential curve only)
+        startLogStep,  // initial log-space step, used when a repeat restarts the slide
 
         // biquad LP/HP filter
         quality = 2, w = PI2 * abs(filter) * 2 / sampleRate,
@@ -167,6 +182,23 @@ export const ZZFX =
         // allocate the full sample buffer up front, much faster than growing an array
         length = attack + decay + sustain + release + delay | 0;
         b = new Float32Array(length > 0 ? length : 0);
+
+        // export the base instantaneous frequency of every sample for verification
+        frequencyTrace = new Float32Array(length);
+
+        if (exponential)
+        {
+            // exponential slide integrates in log space so the curve is geometric
+            // while the phase accumulator itself stays continuous; frequencies must stay positive
+            if (!(frequency > 0))
+                throw new RangeError(`ZzFX: exponential slide requires a positive effective frequency, got ${frequency}`);
+            logFrequency = Math.log(frequency);
+            // match the linear path's first relative step: exp(logStep)-1 === slide/frequency
+            logStep = Math.log1p(slide / frequency);
+            startLogStep = logStep;
+        }
+
+        this.lastFrequencyTrace = frequencyTrace;
 
         // generate waveform
         for(; i < length; b[i++] = s * volume)                 // sample
@@ -203,14 +235,37 @@ export const ZZFX =
                     s = y1 = b2*x2 + b1*(x2=x1) + b0*(x1=s) - a2*y2 - a1*(y2=y1);
             }
 
-            f = (frequency += slide += deltaSlide) *// frequency
-                Math.cos(modulation*modOffset++);   // modulation
-            t += f + f*noise*(i*i*PI2%2-1);         // noise
+            // phase accumulator: advance the carrier along the configured slide
+            // curve, then add this sample's instantaneous frequency to phase t,
+            // so a changing frequency never breaks phase continuity
+            if (exponential)
+            {
+                if (!(frequency > 0))
+                    throw new RangeError('ZzFX: instantaneous frequency must stay positive during an exponential slide');
+                logStep += deltaSlide;            // log-rate acceleration, mirrors deltaSlide
+                logFrequency += logStep;          // integrate log frequency -> geometric slide
+                frequency = Math.exp(logFrequency);
+            }
+            else
+            {
+                frequency += slide += deltaSlide; // linear slide, legacy arithmetic bit for bit
+            }
+
+            if (!(frequency > 0))
+                throw new RangeError(`ZzFX: instantaneous frequency must be > 0, got ${frequency}`);
+
+            frequencyTrace[i] = frequency * sampleRate / PI2; // base frequency in Hz
+
+            f = frequency *                       // instantaneous angular frequency
+                Math.cos(modulation*modOffset++); // modulation
+            t += f + f*noise*(i*i*PI2%2-1);       // phase accumulation + noise
 
             if (jump && ++jump > pitchJumpTime)     // pitch jump
             { 
                 frequency += pitchJump;             // apply pitch jump
                 startFrequency += pitchJump;        // also apply to start
+                if (exponential)                    // re-sync log accumulator, phase t is untouched
+                    logFrequency = Math.log(frequency);
                 jump = 0;                           // stop pitch jump time
             } 
 
@@ -218,6 +273,11 @@ export const ZZFX =
             { 
                 frequency = startFrequency;   // reset frequency
                 slide = startSlide;           // reset slide
+                if (exponential)              // reset log-space accumulators too
+                {
+                    logFrequency = Math.log(frequency);
+                    logStep = startLogStep;
+                }
                 jump ||= 1;                   // reset pitch jump time
             }
         }
