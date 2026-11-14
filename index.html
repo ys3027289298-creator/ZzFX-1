@@ -215,6 +215,7 @@ dialog textarea{ width:100%; height:180px; margin-bottom:10px; white-space:pre; 
         <button class=large title='Toggle favorite on current sound [F]' onclick=FavoriteSelected()>Favorite</button><button class=large title='Move selected to top of the list' onclick="SelectedToTop()">Top</button><button class=large title='Copy to the top of the list without changing your selection' onclick=CloneSelected()>Clone</button><button title='Remove selected sound [DEL]' class=large onclick=RemoveSelected()>Remove</button>
         <button id=button_share title='Copy a link to the selected sound' onclick=ShareSelected()>Share</button>
         <button title='Download the selected wave file, or drag this button into a folder or app' draggable=true ondragstart=DragWave(event) onclick=SaveWave()>Save Wav</button>
+        <button title='Export the selected sound as a MIDI file for editing in a DAW' onclick=OpenMidiDialog()>Save Midi</button>
         <button title='Load one or more sounds from zzfx code' onclick=LoadSound()>Load Sound</button>
         <button title='Import all sounds from a text file.' onclick=Import()>Import</button>
         <button title='Export all sounds to a text file.' onclick=Export()>Export</button>
@@ -272,6 +273,19 @@ dialog textarea{ width:100%; height:180px; margin-bottom:10px; white-space:pre; 
             <button class=btn-primary onclick=LoadSoundsFromCode(textarea_loadSound.value)>Load</button>
           </div>
         </dialog>
+        <dialog id=dialog_midi>
+          <div class=label>Export MIDI</div>
+          <div class=btn-row>
+            <label>Tempo (BPM) <input id=input_midiBpm type=number value=120 min=20 max=400 step=1 oninput=UpdateMidiDiagnostics()></label>
+            <label>Pitch (semitones) <input id=input_midiPitch type=number value=0 min=-48 max=48 step=1 oninput=UpdateMidiDiagnostics()></label>
+          </div>
+          <div id=div_midiSummary></div>
+          <div id=div_midiDiagnostics></div>
+          <div class=btn-row style=justify-content:flex-end>
+            <button onclick=dialog_midi.close()>Cancel</button>
+            <button class=btn-primary onclick=SaveMidi()>Export Midi</button>
+          </div>
+        </dialog>
       </div>
     </div>
 
@@ -292,6 +306,10 @@ window.ZZFXSound = ZZFXSound;
 
 import {buildWavURL} from './wav.js';
 window.buildWavURL = buildWavURL;
+
+import {buildMidiData, buildMidiURL} from './midi.js';
+window.buildMidiData = buildMidiData;
+window.buildMidiURL = buildMidiURL;
 
 Init();
 
@@ -1721,6 +1739,43 @@ function DragWave(e)
     const {url, filename} = BuildWaveFile();
     e.dataTransfer.setData('DownloadURL', 'audio/wav:' + filename + ':' + url);
     e.dataTransfer.effectAllowed = 'copy';
+}
+
+// midi export options from the dialog, timeline (tempo) and pitch are user settable
+function GetMidiOptions()
+{
+    return {
+        bpm: Math.min(400, Math.max(20, parseFloat(input_midiBpm.value) || 120)),
+        pitchOffset: Math.min(48, Math.max(-48, parseInt(input_midiPitch.value) || 0)),
+    };
+}
+
+function OpenMidiDialog()
+{
+    UpdateMidiDiagnostics();
+    dialog_midi.showModal();
+}
+
+// preview how the sound maps to MIDI and list anything that cannot be mapped
+function UpdateMidiDiagnostics()
+{
+    const sound = BuildSoundFromSettings();
+    const {diagnostics, note, durationSeconds, bpm} = buildMidiData(sound, GetMidiOptions());
+    div_midiSummary.textContent = `1 note (MIDI ${note}), ${durationSeconds.toFixed(2)}s at ${bpm} BPM`;
+    div_midiDiagnostics.innerHTML = diagnostics.length
+        ? '<b>Parameters without a MIDI equivalent (not exported):</b><br>' +
+          diagnostics.map(d=>'• '+d).join('<br>')
+        : 'All active parameters mapped to MIDI.';
+}
+
+function SaveMidi()
+{
+    const sound = BuildSoundFromSettings();
+    const {url} = buildMidiURL(sound, GetMidiOptions());
+    a_downloadLink.href = url;
+    a_downloadLink.download = (sound.name.trim() || 'zzfx') + '.mid';
+    a_downloadLink.click();
+    dialog_midi.close();
 }
 
 function DrawSoundWave(b, volume, sound)

@@ -60,6 +60,26 @@ zzfx(...[,,129,.01,,.15,,,,,,,,5]); // Drum
 - Sharing: Load sounds via pasted zzfx code.
 - Export/Import: Drag-and-drop support for sound lists.
 - Offline Playback: Save sounds as .wav files.
+- MIDI Export: Save sounds as .mid files to keep editing in any DAW.
+
+## 🎹 MIDI Export
+
+The sound designer can export the selected sound as a standard MIDI file
+(SMF type 0) via the **Save Midi** button. Tempo (BPM) and pitch offset
+(semitones) can be set in the export dialog. Parameters map to MIDI as
+follows:
+
+| ZzFX Parameter | MIDI Event |
+| --- | --- |
+| `frequency` | Note number (A4 = 69 = 440 Hz, plus pitch offset) |
+| `attack`+`decay`+`sustain`+`release` | Note duration (scaled by tempo) |
+| `volume` | Note velocity |
+| `slide`, `deltaSlide` | Pitch bend curve (±2 semitone range) |
+| `sustainVolume` | CC11 expression |
+
+Parameters with no MIDI equivalent (noise, filter, delay, modulation,
+tremolo, bit crush, pitch jump, repeat, randomness, wave shape) are listed
+as diagnostics in the export dialog instead of being silently dropped.
 
 ## 🖥️ ZzFX Micro Code
 
