@@ -45,6 +45,43 @@ ZzFX Features
 
 'use strict';
 
+// deterministic noise hash, returns [0,1) from (seed, sample index)
+// pure function of absolute sample index, so chunked and one-shot
+// rendering produce bit-identical noise regardless of call order
+function zzfxNoiseHash(seed, index)
+{
+    let h = Math.imul(index ^ 0x9E3779B9, 0x85EBCA6B) ^
+        Math.imul((seed|0) + 0x27D4EB2F | 0, 0xC2B2AE35);
+    h = Math.imul(h ^ h>>>16, 0x45D9F3B);
+    h = Math.imul(h ^ h>>>16, 0x45D9F3B);
+    return ((h ^ h>>>16) >>> 0) / 4294967296;
+}
+
+// white noise, uniform in [-1,1), zero mean, variance 1/3
+function zzfxWhiteNoise(seed, index)
+{
+    return 2*zzfxNoiseHash(seed, index) - 1;
+}
+
+// pink noise via Voss-McCartney sum of 12 octave rows covering the audible
+// spectrum down to ~10 Hz at 44.1 kHz, each row is a pure function of
+// (seed, index >> row), so it needs no state and stays deterministic per
+// sample index; block pairs share a magnitude with alternating sign so
+// every pair cancels exactly, giving zero DC bias over any multiple of
+// 2^12 samples (residual for arbitrary length N is bounded by
+// 2^11/(N*sqrt(12))); scaled to match white noise variance 1/3
+function zzfxPinkNoise(seed, index)
+{
+    let sum = 0;
+    for(let row = 0; row < 12; ++row)
+    {
+        const block = index >> row;
+        sum += (block&1 ? -1 : 1) *
+            (2*zzfxNoiseHash(seed ^ Math.imul(row+1, 0x9E3779B9), block >> 1) - 1);
+    }
+    return sum / Math.sqrt(12);
+}
+
 // play a zzfx sound
 export function zzfx(...parameters) { return ZZFX.play(...parameters) }
 
@@ -121,9 +158,17 @@ export const ZZFX =
         sustainVolume = 1,
         decay = 0,
         tremolo = 0,
-        filter = 0
+        filter = 0,
+        noiseType = 0,
+        noiseSeed = 0
     )
     {
+        // validate noise parameters
+        if (noiseType !== 0 && noiseType !== 1 && noiseType !== 2)
+            throw new RangeError(`Invalid noiseType ${noiseType}, expected 0 (legacy), 1 (white), or 2 (pink)`);
+        if (!Number.isFinite(noiseSeed))
+            throw new TypeError(`Invalid noiseSeed ${noiseSeed}, expected a finite number`);
+
         // init parameters
         let sampleRate = this.sampleRate,
             PI2 = Math.PI*2, 
@@ -205,7 +250,11 @@ export const ZZFX =
 
             f = (frequency += slide += deltaSlide) *// frequency
                 Math.cos(modulation*modOffset++);   // modulation
-            t += f + f*noise*(i*i*PI2%2-1);         // noise
+            t += f + f*noise*(noiseType ?           // noise
+                noiseType > 1 ?
+                zzfxPinkNoise(noiseSeed, i) :       // 2 pink noise
+                zzfxWhiteNoise(noiseSeed, i) :      // 1 white noise
+                i*i*PI2%2-1);                       // 0 legacy noise
 
             if (jump && ++jump > pitchJumpTime)     // pitch jump
             { 
