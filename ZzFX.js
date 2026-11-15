@@ -49,6 +49,154 @@ ZzFX Features
 export function zzfx(...parameters) { return ZZFX.play(...parameters) }
 
 ///////////////////////////////////////////////////////////////////////////////
+// Modulation effects (chorus & flanger) built on one shared bounded delay line
+
+// hard upper bounds, so every legal configuration has a fixed memory ceiling
+export const EFFECT_LIMITS = Object.freeze(
+{
+    maxDelaySeconds:  .1,    // delay + depth may never exceed this
+    maxRateHz:        20,    // LFO modulation rate
+    maxMix:           1,     // wet/dry mix
+    maxFeedback:      .95,   // flanger feedback coefficient
+    minSampleRate:    1,
+    maxSampleRate:    384000
+});
+
+// default tuning: chorus uses long slow modulation, flanger short fast modulation
+export const EFFECT_PRESETS = Object.freeze(
+{
+    chorus:  Object.freeze({ delaySeconds: .02, rateHz: 1,   depthSeconds: .008, mix: .5, feedback: 0  }),
+    flanger: Object.freeze({ delaySeconds: .004, rateHz: 2, depthSeconds: .002, mix: .5, feedback: .4 })
+});
+
+// fixed-capacity circular delay line shared by both effects
+export class DelayLine
+{
+    constructor(capacity)
+    {
+        if (!Number.isInteger(capacity) || capacity <= 0)
+            throw new RangeError('DelayLine capacity must be a positive integer');
+
+        this.capacity = capacity;
+        this.buffer = new Float32Array(capacity); // bounded: never reallocated
+        this.index = 0;
+        this.memoryBytes = capacity * this.buffer.BYTES_PER_ELEMENT;
+    }
+
+    clear()
+    {
+        this.buffer.fill(0);
+        this.index = 0;
+    }
+
+    write(sample)
+    {
+        this.buffer[this.index] = sample;
+        this.index = (this.index + 1) % this.capacity;
+    }
+
+    // fractional read, delaySamples in [0, capacity - 1], linear interpolation
+    read(delaySamples)
+    {
+        const whole = delaySamples | 0;
+        const fraction = delaySamples - whole;
+        const buffer = this.buffer;
+        const capacity = this.capacity;
+        const indexA = (this.index - 1 - whole + capacity * 2) % capacity;
+        const indexB = (indexA - 1 + capacity) % capacity;
+        return buffer[indexA] * (1 - fraction) + buffer[indexB] * fraction;
+    }
+}
+
+// validate and normalize an effect configuration, throws RangeError on bad input
+export function validateEffectConfig(config, sampleRate)
+{
+    if (config === null || typeof config != 'object' || Array.isArray(config))
+        throw new RangeError('Effect configuration must be an object');
+
+    if (!Number.isFinite(sampleRate) ||
+        sampleRate < EFFECT_LIMITS.minSampleRate ||
+        sampleRate > EFFECT_LIMITS.maxSampleRate)
+        throw new RangeError('sampleRate out of range');
+
+    const type = config.type;
+    if (type != 'chorus' && type != 'flanger')
+        throw new RangeError(`Unknown effect type: ${type}`);
+
+    const preset = EFFECT_PRESETS[type];
+    const delaySeconds = config.delaySeconds ?? preset.delaySeconds;
+    if (!Number.isFinite(delaySeconds) || delaySeconds <= 0 ||
+        delaySeconds > EFFECT_LIMITS.maxDelaySeconds)
+        throw new RangeError('delaySeconds out of range');
+
+    const depthSeconds = config.depthSeconds ?? preset.depthSeconds;
+    if (!Number.isFinite(depthSeconds) || depthSeconds < 0 ||
+        depthSeconds > EFFECT_LIMITS.maxDelaySeconds)
+        throw new RangeError('depthSeconds out of range');
+
+    if (delaySeconds + depthSeconds > EFFECT_LIMITS.maxDelaySeconds)
+        throw new RangeError(
+            `delaySeconds + depthSeconds exceeds the ${EFFECT_LIMITS.maxDelaySeconds}s bound`);
+
+    const rateHz = config.rateHz ?? preset.rateHz;
+    if (!Number.isFinite(rateHz) || rateHz <= 0 || rateHz > EFFECT_LIMITS.maxRateHz)
+        throw new RangeError('rateHz out of range');
+
+    const mix = config.mix ?? preset.mix;
+    if (!Number.isFinite(mix) || mix < 0 || mix > EFFECT_LIMITS.maxMix)
+        throw new RangeError('mix out of range');
+
+    const feedback = config.feedback ?? preset.feedback;
+    if (!Number.isFinite(feedback) || feedback < 0 ||
+        feedback > EFFECT_LIMITS.maxFeedback)
+        throw new RangeError('feedback out of range');
+
+    return {type, delaySeconds, depthSeconds, rateHz, mix, feedback, sampleRate};
+}
+
+// apply a chorus or flanger to a sample buffer; returns a new Float32Array
+export function applyEffect(samples, config, sampleRate = 44100)
+{
+    if (!(samples instanceof Float32Array) || samples.length == 0)
+        throw new RangeError('applyEffect requires a non-empty sample buffer');
+
+    // disabled effect: bit-exact copy of the input, sample for sample
+    if (!config || config.enabled === false)
+        return samples.slice();
+
+    const settings = validateEffectConfig(config, sampleRate);
+
+    // bounded delay line: one spare sample keeps fractional reads in range
+    const maxDelaySamples =
+        (settings.delaySeconds + settings.depthSeconds) * sampleRate;
+    const capacity = Math.ceil(maxDelaySamples) + 1;
+    const delayLine = new DelayLine(capacity);
+
+    const baseDelay = settings.delaySeconds * sampleRate;
+    const depth = settings.depthSeconds * sampleRate;
+    const phaseStep = 2 * Math.PI * settings.rateHz / sampleRate;
+    const output = new Float32Array(samples.length);
+
+    let phase = 0;
+    for (let i = 0; i < samples.length; ++i)
+    {
+        const input = samples[i];
+        const modulatedDelay = baseDelay + depth * Math.sin(phase);
+        phase += phaseStep;
+
+        const delayed = delayLine.read(modulatedDelay);
+        let writeValue = input;
+        if (settings.feedback)
+            writeValue = input + settings.feedback * delayed;
+
+        delayLine.write(writeValue);
+        output[i] = input * (1 - settings.mix) + delayed * settings.mix;
+    }
+
+    return output;
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // ZZFX API for playing sounds
 export const ZZFX =
 {
@@ -57,7 +205,13 @@ export const ZZFX =
     
     // sample rate for audio
     sampleRate: 44100,
-    
+
+    // apply a chorus or flanger modulation effect to a sample buffer
+    applyEffect: function(samples, config)
+    {
+        return applyEffect(samples, config, this.sampleRate);
+    },
+
     // create shared audio context
     audioContext: new AudioContext,
 

@@ -46,6 +46,20 @@ zzfx(...[1.5,.8,270,,.1,,1,1.5,,,,,,,,.1,.01]); // Piano
 zzfx(...[,,129,.01,,.15,,,,,,,,5]); // Drum
 ```
 
+## 🎛️ Modulation Effects (Chorus & Flanger)
+
+* Add space without reverb using `ZZFX.applyEffect(samples, config)`; both effects share one bounded delay line.
+* `config.type` is `'chorus'` or `'flanger'`; `delaySeconds`, `rateHz`, `depthSeconds`, `mix`, and `feedback` are all configurable.
+* Pass `null` or `{enabled: false}` to bypass; the output is then a sample-for-sample copy of the input.
+* Hard bounds keep memory fixed: `delaySeconds + depthSeconds <= 0.1` s, so at 44100 Hz one instance never allocates more than 4411 floats (17644 bytes).
+* Out-of-range parameters throw a `RangeError`; see `artifacts/REPORT.md` for verification data.
+
+```javascript
+const samples = ZZFX.buildSamples(...[,,925,.04,.3,.6,1,.3,,6.27,-184,.09,.17]);
+const chorused = ZZFX.applyEffect(samples, {type: 'chorus',  rateHz: 1});
+const flanged  = ZZFX.applyEffect(samples, {type: 'flanger', rateHz: 2, feedback: .4});
+```
+
 ## 🎶 ZzFX Music
 
 - [ZzFX now supports music via ZzFXM by Keith Clark!](https://keithclark.github.io/ZzFXM/)
