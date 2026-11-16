@@ -3,14 +3,19 @@
   "version": "1.4.0",
   "description": "A Tiny JavaScript Sound FX System",
   "main": "ZzFX.js",
+  "exports": {
+    ".": "./ZzFX.js",
+    "./waveShaper": "./waveShaper.js"
+  },
   "files": [
     "ZzFX.js",
     "ZzFXMicro.js",
     "ZzFXMicro.min.js",
-    "wav.js"
+    "wav.js",
+    "waveShaper.js"
   ],
   "scripts": {
-    "test": "zzfx()"
+    "test": "node test/waveShaper.test.mjs"
   },
   "repository": {
     "type": "git",

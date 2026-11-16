@@ -7,3 +7,6 @@ docs/superpowers/
 
 # local dev scripts
 scripts/
+
+# scratch ESM copy created by test/waveShaper.test.mjs for Node 18
+artifacts/esm/
