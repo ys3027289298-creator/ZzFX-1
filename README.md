@@ -46,6 +46,44 @@ zzfx(...[1.5,.8,270,,.1,,1,1.5,,,,,,,,.1,.01]); // Piano
 zzfx(...[,,129,.01,,.15,,,,,,,,5]); // Drum
 ```
 
+## 🔊 Spatial Effects (Reverb + Delay)
+
+`ZzFXEffects.js` adds a feedback delay and a Schroeder reverb as a separate,
+opt-in post-processing stage. The synth engine itself is untouched: with no
+active effect `applyEffects` returns the exact same `Float32Array` reference,
+so existing output is bit identical.
+
+```javascript
+import {ZZFX} from './ZzFX.js';
+import {applyEffects} from './ZzFXEffects.js';
+
+const dry = ZZFX.buildSamples(...[,,537,.02,.02,.22,1,1.59,-6.98,4.97]);
+const wet = applyEffects(dry,
+{
+    delayTime: .2,        // seconds, range [0, 1]
+    delayFeedback: .6,    // range [0, 0.95) — 0.95 is rejected so echoes always decay
+    delayMix: .3,         // wet mix, range [0, 1]
+    reverbTail: .8,       // reverb tail length in seconds, range [0, 2] (must be > 0 when reverbMix > 0)
+    reverbMix: .25        // reverb wet mix, range [0, 1]
+});
+ZZFX.playSamples([wet]);
+```
+
+### Guarantees
+
+- **Bounded tails**: the delay tail is hard capped at 3 s and the reverb tail
+  at 2 s; all storage is preallocated (no per-sample allocation), so tails can
+  never run indefinitely.
+- **No divergence**: the delay wet series is the geometric sequence
+  `mix * feedback^k` with `feedback < 0.95`; every reverb comb has gain
+  `|g| < 1`. `getPeakBound(options)` returns a hard per-sample analytic peak
+  bound for any input.
+- **Error codes**: invalid parameters throw `ZzFXEffectsError` with stable
+  codes `ZZFX_E1`..`ZZFX_E10` (see `ZzFXEffects.js` for the range table).
+- **Verification**: `npm test` regenerates the pristine-engine baseline and
+  runs the full comparison, bit-exactness, failure-path, tail/peak, and memory
+  accounting suites; results land in `artifacts/effects-report.md`.
+
 ## 🎶 ZzFX Music
 
 - [ZzFX now supports music via ZzFXM by Keith Clark!](https://keithclark.github.io/ZzFXM/)

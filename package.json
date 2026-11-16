@@ -2,6 +2,7 @@
   "name": "zzfx",
   "version": "1.4.0",
   "description": "A Tiny JavaScript Sound FX System",
+  "type": "module",
   "main": "ZzFX.js",
   "files": [
     "ZzFX.js",
@@ -10,7 +11,7 @@
     "wav.js"
   ],
   "scripts": {
-    "test": "zzfx()"
+    "test": "node test/make-baseline.mjs && node test/run-verify.mjs && node test/render-report.mjs"
   },
   "repository": {
     "type": "git",
